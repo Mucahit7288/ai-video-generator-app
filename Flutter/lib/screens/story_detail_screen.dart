@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 import '../models/story_model.dart';
 
 class StoryDetailScreen extends StatefulWidget {
@@ -15,6 +16,8 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   bool _isVideoLoading = false;
   bool _isVideoPlaying = false;
 
+  VideoPlayerController? _videoController;
+
   late final AnimationController _shimmerController;
   late final AnimationController _pulseController;
   late final AnimationController _starsController;
@@ -23,8 +26,9 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   late final Animation<double> _pulseAnimation;
   late final Animation<double> _starsAnimation;
 
-  // Sahte yüklenme simülasyonu için yüzde
+  // Yüklenme simülasyonu için yüzde
   double _loadingProgress = 0.0;
+  bool _isDisposed = false;
 
   @override
   void initState() {
@@ -61,34 +65,82 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
+    _videoController?.dispose(); // Sayfa kapatıldığında belleği temizler
     _shimmerController.dispose();
     _pulseController.dispose();
     _starsController.dispose();
     super.dispose();
   }
 
+  // Video arabelleğe (buffer) alınırken progress bar'ı hareket ettirir
+  void _simulateProgress() async {
+    _loadingProgress = 0.0;
+    while (_isVideoLoading && !_isDisposed && _loadingProgress < 0.95) {
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!_isVideoLoading || _isDisposed) break;
+      if (mounted) {
+        setState(() {
+          _loadingProgress += 0.04;
+          if (_loadingProgress > 0.95) _loadingProgress = 0.95;
+        });
+      }
+    }
+  }
+
   Future<void> _onPlayPressed() async {
     if (_isVideoLoading || _isVideoPlaying) return;
+
+    // Eğer video daha önceden yüklenmişse tekrar başlat, akışı bozma
+    if (_videoController != null && _videoController!.value.isInitialized) {
+      await _videoController!.play();
+      setState(() {
+        _isVideoPlaying = true;
+      });
+      return;
+    }
 
     setState(() {
       _isVideoLoading = true;
       _loadingProgress = 0.0;
     });
 
-    // Backend'den video yükleniyormuş gibi kademeli ilerleme simülasyonu
-    for (int i = 1; i <= 10; i++) {
-      await Future.delayed(const Duration(milliseconds: 280));
+    _simulateProgress();
+
+    try {
+      // HomeScreen'de video URL'ini imageUrls listesinin ilk elemanına kaydetmiştik.
+      // Eğer kendi StoryModel'inize 'videoUrl' alanı eklediyseniz burayı güncelleyebilirsiniz.
+      final videoUrl = widget.story.imageUrls.isNotEmpty
+          ? widget.story.imageUrls.first
+          : '';
+
+      if (videoUrl.isEmpty) {
+        throw Exception("Bu hikayeye ait video bağlantısı bulunamadı.");
+      }
+
+      // Doğrudan web uyumlu VideoPlayerController ağ akışı
+      _videoController = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+
+      await _videoController!.initialize();
+      await _videoController!.setLooping(true); // Döngüsel oynat
+      await _videoController!.play(); // Sesli ve görüntülü oynatmaya başla
+
       if (!mounted) return;
-      setState(() => _loadingProgress = i / 10);
+
+      setState(() {
+        _loadingProgress = 1.0;
+        _isVideoLoading = false;
+        _isVideoPlaying = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isVideoLoading = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Video yüklenirken hata oluştu: $e')),
+      );
     }
-
-    await Future.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
-
-    setState(() {
-      _isVideoLoading = false;
-      _isVideoPlaying = true;
-    });
   }
 
   @override
@@ -160,7 +212,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // --- Uzay temalı arka plan ---
+              // --- Uzay temalı arka plan (her zaman altta kalsın) ---
               _buildSpaceBackground(),
 
               // --- Yıldız parıltıları ---
@@ -185,18 +237,25 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                 ),
               ),
 
-              // --- Oynatma durumuna göre içerik ---
-              SizedBox(
-                height:
-                    100, // Durumlar ne olursa olsun dikey alanı 100 pikselde sabit tutar
-                child: Center(
-                  child: _isVideoPlaying
-                      ? _buildPlayingState()
-                      : _isVideoLoading
-                      ? _buildLoadingState()
-                      : _buildIdleState(),
+              // --- GERÇEK VİDEO OYNATICI ---
+              if (_videoController != null &&
+                  _videoController!.value.isInitialized &&
+                  _isVideoPlaying)
+                Positioned.fill(child: VideoPlayer(_videoController!)),
+
+              // --- Oynatma durumuna göre ara yüz ---
+              if (!_isVideoPlaying)
+                SizedBox(
+                  height: 100,
+                  child: Center(
+                    child: _isVideoLoading
+                        ? _buildLoadingState()
+                        : _buildIdleState(),
+                  ),
                 ),
-              ),
+
+              // Video oynarken üzerinde görünecek (Durdur butonu vb.)
+              if (_isVideoPlaying) _buildPlayingOverlay(),
             ],
           ),
         ),
@@ -281,7 +340,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Şimmer halkası
           AnimatedBuilder(
             animation: _shimmerAnimation,
             builder: (context, _) {
@@ -319,7 +377,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
             },
           ),
           const SizedBox(height: 18),
-          // İlerleme çubuğu
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 40),
             child: Column(
@@ -337,7 +394,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Video yükleniyor… ${(_loadingProgress * 100).toInt()}%',
+                  'Video bağlanıyor… ${(_loadingProgress * 100).toInt()}%',
                   style: TextStyle(
                     fontSize: 11,
                     color: Colors.white.withValues(alpha: 0.45),
@@ -352,60 +409,18 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
     );
   }
 
-  Widget _buildPlayingState() {
+  Widget _buildPlayingOverlay() {
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Oynatma simülasyonu: uzay animasyonu devam ediyor
-        Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: Colors.deepPurpleAccent.withValues(alpha: 0.4),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: const BoxDecoration(
-                        color: Colors.redAccent,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    const Text(
-                      'OYNATILIYOR',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.white70,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        // Durdurma butonu
         Positioned(
           bottom: 14,
           right: 14,
           child: GestureDetector(
-            onTap: () => setState(() => _isVideoPlaying = false),
+            onTap: () {
+              _videoController?.pause();
+              setState(() => _isVideoPlaying = false);
+            },
             child: Container(
               width: 36,
               height: 36,
@@ -432,7 +447,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // --- Tarih satırı ---
           Row(
             children: [
               Icon(
@@ -478,7 +492,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
 
           const SizedBox(height: 20),
 
-          // --- Ince ayraç çizgisi ---
           Container(
             height: 1,
             decoration: BoxDecoration(
@@ -493,7 +506,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
 
           const SizedBox(height: 24),
 
-          // --- Hikaye metni ---
           Text(
             widget.story.content,
             style: TextStyle(
@@ -507,7 +519,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
 
           const SizedBox(height: 32),
 
-          // --- Alt kapanış süsü ---
           Center(
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -556,13 +567,11 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   }
 }
 
-// Yıldızlı uzay arka planı için custom painter
 class _StarfieldPainter extends CustomPainter {
   final double progress;
 
   _StarfieldPainter(this.progress);
 
-  // Deterministik "rastgele" pozisyonlar — her frame'de tutarlı kalır
   static const List<(double, double, double)> _stars = [
     (0.05, 0.12, 1.2),
     (0.14, 0.55, 0.8),
@@ -589,7 +598,6 @@ class _StarfieldPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     for (final (xRatio, yRatio, baseRadius) in _stars) {
-      // Her yıldız farklı frekansta parıldıyor
       final twinkle = 0.5 + 0.5 * _fastSin((progress + xRatio) * 6.28 * 2);
       final opacity = 0.15 + 0.65 * twinkle;
       final radius = baseRadius * (0.8 + 0.4 * twinkle);
@@ -601,7 +609,6 @@ class _StarfieldPainter extends CustomPainter {
       );
     }
 
-    // Birkaç nebula parlak noktası
     _drawNebula(canvas, size, 0.25, 0.35, Colors.deepPurple, progress);
     _drawNebula(canvas, size, 0.70, 0.60, Colors.indigo, progress * 0.7);
   }
@@ -624,9 +631,7 @@ class _StarfieldPainter extends CustomPainter {
     );
   }
 
-  /// dart:math kullanmadan yaklaşık sin hesabı
   double _fastSin(double x) {
-    // Taylor serisi yaklaşımı: sin(x) ≈ x - x³/6 + x⁵/120
     final normalized = x % 6.2832;
     final t = normalized - 3.1416;
     return t * (1 - t * t / 6.0);

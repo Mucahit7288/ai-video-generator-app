@@ -1,0 +1,12 @@
+# Backend geçici ve statik dosyaları
+Backend/static/*.mp4
+Backend/static/*.jpg
+Backend/static/*.mp3
+Backend/temp/
+__pycache__/
+.env
+
+# Flutter Web / Bağımlılıklar
+Flutter/.dart_tool/
+Flutter/.packages
+Flutter/build/

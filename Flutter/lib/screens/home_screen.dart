@@ -1,10 +1,12 @@
 // ignore_for_file: deprecated_member_use
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:http/http.dart' as http;
 
 import '../models/story_model.dart';
-import '../services/gemini_service.dart';
 import 'story_detail_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -17,7 +19,6 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   final TextEditingController _promptController = TextEditingController();
-  final GeminiService _geminiService = GeminiService();
   bool _isLoading = false;
 
   late final AnimationController _pulseController;
@@ -58,28 +59,58 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() => _isLoading = true);
 
     try {
-      final result = await _geminiService.generateStory(userPrompt);
+      // Doğrudan Python backend endpoint'ine istek atıyoruz.
+      // http paketi Flutter Web ile tam uyumludur.
+      final url = Uri.parse('http://localhost:5000/generate-video');
 
-      final title = result['title'] ?? 'İsimsiz Hikaye';
-      final content = result['content'] ?? '';
-
-      final story = StoryModel(
-        title: title,
-        content: content,
-        createdAt: DateTime.now(),
-        imageUrls: [],
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'user_prompt': userPrompt}),
       );
 
-      await Hive.box<StoryModel>('stories').add(story);
+      if (response.statusCode == 200) {
+        // Web ortamında veya bazı sunucularda Türkçe karakter bozulmasını
+        // önlemek için bodyBytes üzerinden decode ediyoruz.
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
 
-      _promptController.clear();
+        if (data['success'] == true) {
+          final title = data['baslik'] ?? 'İsimsiz Hikaye';
+          final content = data['hikaye'] ?? '';
+          final videoUrl = data['video_url'] ?? '';
 
-      if (mounted) {
-        _showSnackBar(
-          message: '"$title" kaydedildi!',
-          icon: Icons.auto_stories_rounded,
-          color: Colors.deepPurpleAccent,
-        );
+          // Gelen yanıtı alıp yerel listeye pürüzsüzce kaydediyoruz.
+          final story = StoryModel(
+            title: title,
+            content: content,
+            createdAt: DateTime.now(),
+            imageUrls: videoUrl.isNotEmpty ? [videoUrl] : [],
+          );
+
+          await Hive.box<StoryModel>('stories').add(story);
+
+          _promptController.clear();
+
+          if (mounted) {
+            _showSnackBar(
+              message: '"$title" hazırlandı ve kaydedildi!',
+              icon: Icons.movie_creation_rounded,
+              color: Colors.deepPurpleAccent,
+            );
+
+            // Başarılı kayıttan sonra doğrudan detay ekranına pasla
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => StoryDetailScreen(story: story),
+              ),
+            );
+          }
+        } else {
+          throw Exception(data['hata'] ?? 'Sunucu video oluşturamadı.');
+        }
+      } else {
+        throw Exception('Sunucu hatası: HTTP ${response.statusCode}');
       }
     } catch (e) {
       if (mounted) {
@@ -140,13 +171,16 @@ class _HomeScreenState extends State<HomeScreen>
                 padding: const EdgeInsets.only(right: 16),
                 child: Center(
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.deepPurple.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(
-                          color: Colors.deepPurpleAccent.withValues(alpha: 0.4)),
+                        color: Colors.deepPurpleAccent.withValues(alpha: 0.4),
+                      ),
                     ),
                     child: Text(
                       '$count hikaye',
@@ -181,9 +215,7 @@ class _HomeScreenState extends State<HomeScreen>
       decoration: BoxDecoration(
         color: const Color(0xFF1E1B2E),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.deepPurple.withValues(alpha: 0.3),
-        ),
+        border: Border.all(color: Colors.deepPurple.withValues(alpha: 0.3)),
         boxShadow: [
           BoxShadow(
             color: Colors.deepPurple.withValues(alpha: 0.15),
@@ -262,7 +294,9 @@ class _HomeScreenState extends State<HomeScreen>
                   backgroundColor: _isLoading
                       ? Colors.deepPurple.withValues(alpha: 0.4)
                       : Colors.deepPurple,
-                  disabledBackgroundColor: Colors.deepPurple.withValues(alpha: 0.4),
+                  disabledBackgroundColor: Colors.deepPurple.withValues(
+                    alpha: 0.4,
+                  ),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -284,7 +318,7 @@ class _HomeScreenState extends State<HomeScreen>
                           ),
                           SizedBox(width: 10),
                           Text(
-                            'Hikaye yazılıyor…',
+                            'Hikaye ve video üretiliyor…',
                             style: TextStyle(
                               color: Colors.white70,
                               fontSize: 15,
@@ -296,8 +330,11 @@ class _HomeScreenState extends State<HomeScreen>
                     : const Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.bolt_rounded,
-                              color: Colors.yellow, size: 20),
+                          Icon(
+                            Icons.bolt_rounded,
+                            color: Colors.yellow,
+                            size: 20,
+                          ),
                           SizedBox(width: 8),
                           Text(
                             'Hikaye Üret',
@@ -322,8 +359,11 @@ class _HomeScreenState extends State<HomeScreen>
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
       child: Row(
         children: [
-          const Icon(Icons.auto_stories_rounded,
-              size: 16, color: Colors.white38),
+          const Icon(
+            Icons.auto_stories_rounded,
+            size: 16,
+            color: Colors.white38,
+          ),
           const SizedBox(width: 6),
           const Text(
             'Kayıtlı Hikayeler',
@@ -389,8 +429,6 @@ class _HomeScreenState extends State<HomeScreen>
           itemBuilder: (context, index) {
             final story = stories[index];
             return Dismissible(
-              // Her kartın benzersiz anahtarı olarak Hive key kullanılıyor.
-              // Bu sayede ters sıralama kaynaklı index karışıklığı tamamen önleniyor.
               key: ValueKey(story.key),
               direction: DismissDirection.endToStart,
               onDismissed: (_) {
@@ -404,18 +442,24 @@ class _HomeScreenState extends State<HomeScreen>
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                       side: BorderSide(
-                          color: Colors.redAccent.withValues(alpha: 0.5)),
+                        color: Colors.redAccent.withValues(alpha: 0.5),
+                      ),
                     ),
                     content: Row(
                       children: [
-                        const Icon(Icons.delete_sweep_rounded,
-                            color: Colors.redAccent, size: 20),
+                        const Icon(
+                          Icons.delete_sweep_rounded,
+                          color: Colors.redAccent,
+                          size: 20,
+                        ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             '"${story.title}" silindi.',
                             style: const TextStyle(
-                                color: Colors.white70, fontSize: 14),
+                              color: Colors.white70,
+                              fontSize: 14,
+                            ),
                           ),
                         ),
                       ],
@@ -424,7 +468,6 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 );
               },
-              // Kaydırma sırasında arkada görünen kırmızı zemin + çöp kutusu
               background: Container(
                 margin: const EdgeInsets.only(bottom: 12),
                 decoration: BoxDecoration(
@@ -476,78 +519,77 @@ class _StoryCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         onTap: () => Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => StoryDetailScreen(story: story),
-          ),
+          MaterialPageRoute(builder: (_) => StoryDetailScreen(story: story)),
         ),
         child: Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1B2E),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.06),
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E1B2E),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withOpacity(0.06)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      story.title,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _formatDate(story.createdAt),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white.withOpacity(0.3),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                story.content,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.white.withOpacity(0.55),
+                  height: 1.55,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Icon(
+                    Icons.schedule_rounded,
+                    size: 12,
+                    color: Colors.deepPurpleAccent.withOpacity(0.6),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${story.content.split(' ').length} kelime',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.deepPurpleAccent.withOpacity(0.6),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  story.title,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                    letterSpacing: 0.2,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                _formatDate(story.createdAt),
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.white.withOpacity(0.3),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            story.content,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
-              color: Colors.white.withOpacity(0.55),
-              height: 1.55,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Icon(Icons.schedule_rounded,
-                  size: 12, color: Colors.deepPurpleAccent.withOpacity(0.6)),
-              const SizedBox(width: 4),
-              Text(
-                '${story.content.split(' ').length} kelime',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.deepPurpleAccent.withOpacity(0.6),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-        ), // Container
-      ), // InkWell
-    ); // Material
+    );
   }
 
   String _formatDate(DateTime date) {
