@@ -7,12 +7,15 @@ Kullanıcıdan gelen fikri sırasıyla şu aşamalardan geçirir:
   3. YZ Ses Üretimi     → gTTS ile Türkçe MP3 seslendirme
   4. Video Birleştirme  → MoviePy ile output.mp4
 """
-
+import asyncio
+import edge_tts
 import os
 import re
 import uuid
 import logging
 import requests
+import random
+import shutil
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -26,7 +29,7 @@ from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
 # Buraya Google AI Studio'dan aldığınız yeni Gemini API anahtarını girin.
 # Flutter tarafı bu anahtarı hiç görmez; tüm YZ çağrıları sunucu üzerinden yapılır.
-GEMINI_API_KEY = "BURAYA_KENDI_API_ANAHTARINIZI_GIRIN"
+GEMINI_API_KEY = "BURAYA-API-KEY-GELECEK"
 
 # Üretilen geçici dosyalar ve nihai video bu klasöre kaydedilir.
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -186,43 +189,54 @@ def _sahne_tasvirleri_cikar(hikaye_metni: str) -> list[str]:
 
 def _gorsel_indir(tasvir: str, dosya_yolu: str) -> bool:
     """
-    Pollinations.ai API'sinden bir görsel indirir.
-    Başarılıysa True, değilse False döndürür.
+    Sade ve stabil Pollinations API'sinden bir görsel indirir.
+    Premium filtrelere takılmamak için prompt temizlenir ve 120 karaktere kırpılır.
+    Seed kullanılarak timeout riski azaltılır.
+    Başarılıysa True, değilse False döner.
     """
-    # Tasviri URL güvenli hale getir
-    temiz_tasvir = re.sub(r"[^a-zA-Z0-9 ,._-]", "", tasvir)
+    # Noktalama işaretlerini ve özel karakterleri temizle (sadece harf, rakam ve boşluk kalsın)
+    temiz_tasvir = re.sub(r"[^\w\s]", "", tasvir)
+    
+    # Maksimum 120 karaktere kırp
+    temiz_tasvir = temiz_tasvir[:120].strip()
     temiz_tasvir = temiz_tasvir.replace(" ", "%20")
-
-    url = (
-        f"https://image.pollinations.ai/prompt/{temiz_tasvir}"
-        f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&nologo=true&model=flux"
-    )
+    
+    seed = random.randint(1, 1000)
+    url = f"https://image.pollinations.ai/prompt/{temiz_tasvir}?width={IMG_WIDTH}&height={IMG_HEIGHT}&nologo=true&seed={seed}"
 
     try:
         log.info(f"  Görsel indiriliyor: {url[:80]}…")
-        yanit = requests.get(url, timeout=60)
+        yanit = requests.get(url, timeout=45)
         yanit.raise_for_status()
 
         with open(dosya_yolu, "wb") as f:
             f.write(yanit.content)
 
         dosya_boyutu = os.path.getsize(dosya_yolu)
+        if dosya_boyutu < 10000: # 10 KB altındaysa muhtemelen hatalı/bozuk görseldir
+            log.warning("  Dosya boyutu çok küçük, görsel bozuk olabilir.")
+            return False
+            
         log.info(f"  ✓ Görsel kaydedildi ({dosya_boyutu // 1024} KB): {dosya_yolu}")
         return True
 
-    except requests.RequestException as e:
+    except Exception as e:
         log.error(f"  ✗ Görsel indirme hatası: {e}")
         return False
 
 
 def _ses_uret(hikaye_metni: str, ses_yolu: str) -> None:
-    """
-    gTTS ile hikaye metnini Türkçe MP3 ses dosyasına dönüştürür.
-    """
-    log.info("Aşama 3 → YZ ses seslendirmesi üretiliyor…")
-    tts = gTTS(text=hikaye_metni, lang="tr", slow=False)
-    tts.save(ses_yolu)
-    log.info(f"  ✓ Ses dosyası kaydedildi: {ses_yolu}")
+    """edge-tts kullanarak insan sesi kalitesinde Türkçe seslendirir."""
+    log.info("Aşama 3 → YZ ses seslendirmesi üretiliyor...")
+    
+    async def _ureti_asenkron():
+        # tr-TR-AhmetNeural (Erkek) veya tr-TR-EmelNeural (Kadın)
+        communicate = edge_tts.Communicate(hikaye_metni, "tr-TR-AhmetNeural")
+        await communicate.save(ses_yolu)
+        
+    # Asenkron akışı senkron Flask fonksiyonu içine güvenle bağlıyoruz
+    asyncio.run(_ureti_asenkron())
+    log.info(f"    ✓ Ses dosyası kaydedildi: {ses_yolu}")
 
 
 def _video_birlestir(
@@ -336,14 +350,31 @@ def generate_video():
         log.info("Aşama 2 → YZ görsel üretimi başlıyor…")
         tasvirler = _sahne_tasvirleri_cikar(hikaye)
 
+        basarili_gorsel_referansi = None
+
         for i, tasvir in enumerate(tasvirler):
             gorsel_yolu = os.path.join(TEMP_DIR, f"gorsel_{istek_id}_{i}.jpg")
             gorsel_yollari.append(gorsel_yolu)
-            basarili = _gorsel_indir(tasvir, gorsel_yolu)
+            
+            basarili = False
+            # İlk görselse hata alırsak sistemi kurtarmak için 3 kez farklı seed ile deneyelim
+            deneme_sayisi = 3 if i == 0 else 1
+            
+            for deneme in range(deneme_sayisi):
+                if _gorsel_indir(tasvir, gorsel_yolu):
+                    basarili = True
+                    basarili_gorsel_referansi = gorsel_yolu
+                    break
+                elif deneme < deneme_sayisi - 1:
+                    log.warning(f"  Görsel {i} indirilemedi, farklı seed ile tekrar deneniyor...")
+
+            # Eğer görsel indirilemediyse önceki başarılı YZ görselini klonlayarak boşluğu doldur
             if not basarili:
-                # İndirme başarısız olursa tek renkli yedek görsel oluştur
-                log.warning(f"  Görsel {i + 1} indirilemedi; yedek görsel oluşturuluyor.")
-                _yedek_gorsel_olustur(gorsel_yolu)
+                if basarili_gorsel_referansi and os.path.exists(basarili_gorsel_referansi):
+                    shutil.copy(basarili_gorsel_referansi, gorsel_yolu)
+                    log.warning(f"  Görsel {i} başarısız oldu. Mor ekran yerine önceki YZ görseli kopyalandı.")
+                else:
+                    raise Exception("İlk görsel hiçbir şekilde indirilemedi (Pollinations API hatası).")
 
         # ── Aşama 3: YZ Ses Üretimi ──────────────────────────
         _ses_uret(hikaye, ses_yolu)
@@ -384,72 +415,6 @@ def statik_dosya_sun(dosya_adi: str):
 def saglik_kontrolu():
     """Flutter veya monitoring araçlarının sunucunun ayakta olup olmadığını kontrol etmesi için."""
     return jsonify({"durum": "çalışıyor", "mesaj": "YZ Video Üreticisi hazır."}), 200
-
-
-# ─────────────────────────────────────────────
-# YARDIMCI — YEDEK GÖRSEL
-# ─────────────────────────────────────────────
-
-def _yedek_gorsel_olustur(dosya_yolu: str) -> None:
-    """
-    Pollinations API başarısız olursa NumPy/Pillow ile koyu gradyan bir
-    yedek görsel oluşturur. Pillow yoksa basit JPEG baytları yazar.
-    """
-    try:
-        from PIL import Image, ImageDraw
-        import numpy as np
-
-        goruntu = np.zeros((VIDEO_HEIGHT, VIDEO_WIDTH, 3), dtype=np.uint8)
-        # Koyu mor → lacivert gradyan
-        for x in range(VIDEO_WIDTH):
-            oran = x / VIDEO_WIDTH
-            goruntu[:, x] = [
-                int(30 * (1 - oran)),   # R
-                int(10 * (1 - oran)),   # G
-                int(60 + 40 * oran),    # B
-            ]
-        img = Image.fromarray(goruntu)
-        img.save(dosya_yolu, "JPEG")
-        log.info(f"  Yedek görsel oluşturuldu: {dosya_yolu}")
-
-    except ImportError:
-        # Pillow yoksa 1×1 piksel geçerli JPEG yaz (MoviePy yeniden boyutlandırır)
-        log.warning("  Pillow bulunamadı; minimal JPEG yedek yazılıyor.")
-        minimal_jpeg = bytes([
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
-            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB,
-            0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07,
-            0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B,
-            0x0B, 0x0C, 0x19, 0x12, 0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E,
-            0x1D, 0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C,
-            0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34,
-            0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34,
-            0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01,
-            0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01,
-            0x03, 0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00,
-            0x01, 0x7D, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21,
-            0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32,
-            0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1,
-            0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18,
-            0x19, 0x1A, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36,
-            0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
-            0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64,
-            0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77,
-            0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A,
-            0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3,
-            0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5,
-            0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
-            0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9,
-            0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA,
-            0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF,
-            0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD3,
-            0xFF, 0xD9,
-        ])
-        with open(dosya_yolu, "wb") as f:
-            f.write(minimal_jpeg)
 
 
 # ─────────────────────────────────────────────

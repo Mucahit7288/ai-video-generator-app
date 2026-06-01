@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
-import '../models/story_model.dart';
+import 'package:ai_video_frontend/models/story_model.dart'; // Local class çakışmasını önlemek için asıl modeli import ettik
 
 class StoryDetailScreen extends StatefulWidget {
   const StoryDetailScreen({super.key, required this.story});
@@ -66,14 +66,13 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   @override
   void dispose() {
     _isDisposed = true;
-    _videoController?.dispose(); // Sayfa kapatıldığında belleği temizler
+    _videoController?.dispose();
     _shimmerController.dispose();
     _pulseController.dispose();
     _starsController.dispose();
     super.dispose();
   }
 
-  // Video arabelleğe (buffer) alınırken progress bar'ı hareket ettirir
   void _simulateProgress() async {
     _loadingProgress = 0.0;
     while (_isVideoLoading && !_isDisposed && _loadingProgress < 0.95) {
@@ -89,14 +88,16 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   }
 
   Future<void> _onPlayPressed() async {
-    if (_isVideoLoading || _isVideoPlaying) return;
+    if (_isVideoLoading) return;
 
-    // Eğer video daha önceden yüklenmişse tekrar başlat, akışı bozma
     if (_videoController != null && _videoController!.value.isInitialized) {
-      await _videoController!.play();
-      setState(() {
-        _isVideoPlaying = true;
-      });
+      if (_isVideoPlaying) {
+        await _videoController!.pause();
+        setState(() => _isVideoPlaying = false);
+      } else {
+        await _videoController!.play();
+        setState(() => _isVideoPlaying = true);
+      }
       return;
     }
 
@@ -108,8 +109,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
     _simulateProgress();
 
     try {
-      // HomeScreen'de video URL'ini imageUrls listesinin ilk elemanına kaydetmiştik.
-      // Eğer kendi StoryModel'inize 'videoUrl' alanı eklediyseniz burayı güncelleyebilirsiniz.
       final videoUrl = widget.story.imageUrls.isNotEmpty
           ? widget.story.imageUrls.first
           : '';
@@ -118,12 +117,21 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
         throw Exception("Bu hikayeye ait video bağlantısı bulunamadı.");
       }
 
-      // Doğrudan web uyumlu VideoPlayerController ağ akışı
       _videoController = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
 
       await _videoController!.initialize();
-      await _videoController!.setLooping(true); // Döngüsel oynat
-      await _videoController!.play(); // Sesli ve görüntülü oynatmaya başla
+      await _videoController!.setLooping(true);
+      await _videoController!.play();
+
+      _videoController!.addListener(() {
+        if (!mounted) return;
+        final isPlaying = _videoController!.value.isPlaying;
+        if (isPlaying != _isVideoPlaying) {
+          setState(() {
+            _isVideoPlaying = isPlaying;
+          });
+        }
+      });
 
       if (!mounted) return;
 
@@ -141,6 +149,32 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
         SnackBar(content: Text('Video yüklenirken hata oluştu: $e')),
       );
     }
+  }
+
+  Future<void> _seekBackward() async {
+    if (_videoController == null) return;
+    final position = await _videoController!.position;
+    if (position != null) {
+      final newPosition = position - const Duration(seconds: 10);
+      await _videoController!.seekTo(newPosition < Duration.zero ? Duration.zero : newPosition);
+    }
+  }
+
+  Future<void> _seekForward() async {
+    if (_videoController == null) return;
+    final position = await _videoController!.position;
+    final duration = _videoController!.value.duration;
+    if (position != null) {
+      final newPosition = position + const Duration(seconds: 10);
+      await _videoController!.seekTo(newPosition > duration ? duration : newPosition);
+    }
+  }
+
+  void _toggleMute() {
+    if (_videoController == null) return;
+    final isMuted = _videoController!.value.volume == 0;
+    _videoController!.setVolume(isMuted ? 1.0 : 0.0);
+    setState(() {});
   }
 
   @override
@@ -170,8 +204,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.06),
             borderRadius: BorderRadius.circular(10),
-            // ignore: deprecated_member_use
-            border: Border.all(color: Colors.white.withOpacity(0.08)),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
           ),
           child: const Icon(
             Icons.arrow_back_ios_new_rounded,
@@ -212,10 +245,8 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              // --- Uzay temalı arka plan (her zaman altta kalsın) ---
               _buildSpaceBackground(),
 
-              // --- Yıldız parıltıları ---
               AnimatedBuilder(
                 animation: _starsAnimation,
                 builder: (context, _) => CustomPaint(
@@ -223,7 +254,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                 ),
               ),
 
-              // --- Degrade overlay ---
               Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -237,14 +267,16 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                 ),
               ),
 
-              // --- GERÇEK VİDEO OYNATICI ---
               if (_videoController != null &&
-                  _videoController!.value.isInitialized &&
-                  _isVideoPlaying)
-                Positioned.fill(child: VideoPlayer(_videoController!)),
+                  _videoController!.value.isInitialized)
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: _onPlayPressed,
+                    child: VideoPlayer(_videoController!),
+                  ),
+                ),
 
-              // --- Oynatma durumuna göre ara yüz ---
-              if (!_isVideoPlaying)
+              if (_videoController == null || !_videoController!.value.isInitialized)
                 SizedBox(
                   height: 100,
                   child: Center(
@@ -254,8 +286,8 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                   ),
                 ),
 
-              // Video oynarken üzerinde görünecek (Durdur butonu vb.)
-              if (_isVideoPlaying) _buildPlayingOverlay(),
+              if (_videoController != null && _videoController!.value.isInitialized)
+                _buildPlayingOverlay(),
             ],
           ),
         ),
@@ -414,26 +446,128 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
       fit: StackFit.expand,
       children: [
         Positioned(
-          bottom: 14,
-          right: 14,
-          child: GestureDetector(
-            onTap: () {
-              _videoController?.pause();
-              setState(() => _isVideoPlaying = false);
-            },
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.55),
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.85),
+                  Colors.transparent,
+                ],
               ),
-              child: const Icon(
-                Icons.stop_rounded,
-                color: Colors.white70,
-                size: 18,
-              ),
+            ),
+            padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // İleri-Geri Sarma Çubuğu (VideoProgressIndicator)
+                VideoProgressIndicator(
+                  _videoController!,
+                  allowScrubbing: true,
+                  colors: VideoProgressColors(
+                    playedColor: Colors.deepPurpleAccent,
+                    bufferedColor: Colors.white.withValues(alpha: 0.3),
+                    backgroundColor: Colors.white.withValues(alpha: 0.1),
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                ),
+                
+                const SizedBox(height: 8),
+                
+                // Kontrol Butonları
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    // Sol taraftaki oynatma kontrolleri
+                    Row(
+                      children: [
+                        // Geri 10 Saniye
+                        GestureDetector(
+                          onTap: _seekBackward,
+                          child: const Icon(
+                            Icons.replay_10_rounded,
+                            color: Colors.white,
+                            size: 28,
+                          ),
+                        ),
+                        const SizedBox(width: 20),
+                        
+                        // Oynat / Durdur
+                        GestureDetector(
+                          onTap: _onPlayPressed,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.deepPurpleAccent.withValues(alpha: 0.2),
+                            ),
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(
+                              _isVideoPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                              color: Colors.white,
+                              size: 32,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 20),
+                        
+                        // İleri 10 Saniye
+                        GestureDetector(
+                          onTap: _seekForward,
+                          child: const Icon(
+                            Icons.forward_10_rounded,
+                            color: Colors.white,
+                            size: 28,
+                          ),
+                        ),
+                      ],
+                    ),
+                    
+                    // Sağ taraftaki ses kontrolü (Mute/Unmute) ve Ses Çubuğu
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: _toggleMute,
+                          child: Icon(
+                            (_videoController!.value.volume == 0)
+                                ? Icons.volume_off_rounded
+                                : Icons.volume_up_rounded,
+                            color: Colors.white,
+                            size: 26,
+                          ),
+                        ),
+                        SizedBox(
+                          width: 80,
+                          child: SliderTheme(
+                            data: SliderThemeData(
+                              trackHeight: 2.5,
+                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0),
+                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14.0),
+                              activeTrackColor: Colors.deepPurpleAccent,
+                              inactiveTrackColor: Colors.white.withValues(alpha: 0.2),
+                              thumbColor: Colors.white,
+                              overlayColor: Colors.deepPurpleAccent.withValues(alpha: 0.2),
+                            ),
+                            child: Slider(
+                              value: _videoController!.value.volume,
+                              min: 0.0,
+                              max: 1.0,
+                              onChanged: (value) {
+                                setState(() {
+                                  _videoController!.setVolume(value);
+                                });
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ),
