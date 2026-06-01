@@ -1,7 +1,7 @@
 import 'package:google_generative_ai/google_generative_ai.dart';
 
 class GeminiService {
-  final String _apiKey = "AIzaSyBt8OGgQ4O1zjHb_EwXqDG92BllZUqE0nM";
+  String _apiKey = "REPLACE_WITH_YOUR_API_KEY";
 
   static const String _systemInstruction =
       "Sen yaratıcı bir hikaye yazarısın. "
