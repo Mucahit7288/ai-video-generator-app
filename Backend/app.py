@@ -27,6 +27,7 @@ from flask_cors import CORS
 from gtts import gTTS
 import google.generativeai as genai
 from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
 # ─────────────────────────────────────────────
 # YAPILANDIRMA
@@ -68,6 +69,9 @@ CORS(app)  # Flutter'dan gelen çapraz kaynak isteklerine izin ver
 
 genai.configure(api_key=GEMINI_API_KEY)
 
+# Canlı Durum Takibi (Frontend /status endpoint'i için)
+current_status = {"durum": "Hazır", "aşama": 0, "toplam": 5}
+
 
 # ─────────────────────────────────────────────
 # YARDIMCI FONKSİYONLAR
@@ -80,6 +84,8 @@ def _yz_hikaye_uret(kullanici_fikri: str) -> dict:
     Döndürür: {'baslik': str, 'hikaye': str, 'tasvirler': list[str]}
     """
     log.info("Aşama 1 & 2 → YZ hikaye ve dinamik sahne üretimi tek adımda başlıyor…")
+    current_status["durum"] = "🧠 Yapay zeka hikayeyi kurguluyor..."
+    current_status["aşama"] = 1
 
     sistem_talimati = (
         "Sen yaratıcı bir Türkçe hikaye yazarısın ve görsel bir sanat yönetmenisin. "
@@ -149,6 +155,7 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
         
         try:
             log.info(f"  Görsel üretiliyor (Pollinations): '{temiz_tasvir}'…")
+            current_status["durum"] = f"🎨 Sahne görseli çiziliyor: '{temiz_tasvir[:30]}…'"
             yanit = requests.get(url, timeout=60)
             yanit.raise_for_status()
 
@@ -189,6 +196,8 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
 def _ses_uret(hikaye_metni: str, ses_yolu: str) -> None:
     """edge-tts kullanarak insan sesi kalitesinde Türkçe seslendirir."""
     log.info("Aşama 3 → YZ ses seslendirmesi üretiliyor...")
+    current_status["durum"] = "🔊 Hikaye seslendiriliyor..."
+    current_status["aşama"] = 4
     
     async def _ureti_asenkron():
         # tr-TR-AhmetNeural (Erkek) veya tr-TR-EmelNeural (Kadın)
@@ -206,32 +215,49 @@ def _video_birlestir(
     cikti_yolu: str,
 ) -> None:
     """
-    3 görseli ses dosyasının toplam süresi boyunca eşit aralıklarla
-    sırayla göstererek MP4 video dosyası oluşturur.
+    Görselleri ses dosyasının toplam süresi boyunca eşit aralıklarla
+    sırayla gösterir. Görseller arası 1 saniyelik crossfade geçiş efekti ekler.
     """
-    log.info("Aşama 4 → Video birleştirme başlıyor…")
+    log.info("Aşama 4 → Video birleştirme başlıyor (Crossfade)…")
+    current_status["durum"] = "🎬 Sahneler birleştiriliyor ve video oluşturuluyor..."
+    current_status["aşama"] = 5
 
     ses_klibi = AudioFileClip(ses_yolu)
     toplam_sure = ses_klibi.duration
-    gorsel_sure = toplam_sure / len(gorsel_yollari)
+    gecis_suresi = 1.0  # 1 saniyelik crossfade
+    gorsel_sayisi = len(gorsel_yollari)
+    
+    # Crossfade örtüşmeleri hesaba katarak görsel başına süreyi hesapla
+    gorsel_sure = (toplam_sure + (gorsel_sayisi - 1) * gecis_suresi) / gorsel_sayisi
 
     log.info(
         f"  Ses süresi: {toplam_sure:.1f}s | "
-        f"Görsel başına süre: {gorsel_sure:.1f}s"
+        f"Görsel başına süre: {gorsel_sure:.1f}s | "
+        f"Geçiş süresi: {gecis_suresi}s"
     )
 
     klip_listesi = []
     for i, gorsel_yolu in enumerate(gorsel_yollari):
-        # Yeni MoviePy v2.x sürümüyle uyumlu yapı
         gorsel_klibi = (
             ImageClip(gorsel_yolu)
             .with_duration(gorsel_sure)
             .resized((VIDEO_WIDTH, VIDEO_HEIGHT))
         )
+
+        # ── 6. Story: Crossfade Geçiş Efekti ──────────────────
+        efektler = []
+        if i > 0:
+            efektler.append(CrossFadeIn(gecis_suresi))
+        if i < gorsel_sayisi - 1:
+            efektler.append(CrossFadeOut(gecis_suresi))
+        
+        if efektler:
+            gorsel_klibi = gorsel_klibi.with_effects(efektler)
+
         klip_listesi.append(gorsel_klibi)
         log.info(f"  Görsel {i + 1} klibe eklendi: {gorsel_yolu}")
 
-    birlesik_video = concatenate_videoclips(klip_listesi, method="compose")
+    birlesik_video = concatenate_videoclips(klip_listesi, method="compose", padding=-gecis_suresi)
     birlesik_video = birlesik_video.with_audio(ses_klibi)
 
     birlesik_video.write_videofile(
@@ -241,14 +267,55 @@ def _video_birlestir(
         audio_codec="aac",
         temp_audiofile=os.path.join(TEMP_DIR, "temp_audio.m4a"),
         remove_temp=True,
-        logger=None,  # MoviePy'nin kendi loglarını sustur
+        logger=None,
     )
 
-    # Belleği serbest bırak
     ses_klibi.close()
     birlesik_video.close()
 
-    log.info(f"  ✓ Video oluşturuldu: {cikti_yolu}")
+    log.info(f"  ✓ Video oluşturuldu (Crossfade): {cikti_yolu}")
+
+
+def _altyazi_uret(hikaye_metni: str, toplam_sure: float, vtt_yolu: str) -> None:
+    """
+    7. Story: Hikaye metninden WebVTT (.vtt) formatında altyazı dosyası üretir.
+    Metni 5-6 kelimelik parçalara böler ve ses süresine orantalar.
+    """
+    log.info("Aşama 5 → WebVTT altyazı dosyası üretiliyor…")
+
+    kelimeler = hikaye_metni.split()
+    parcalar = []
+    for j in range(0, len(kelimeler), 5):
+        parca = " ".join(kelimeler[j:j+5])
+        parcalar.append(parca)
+
+    if not parcalar:
+        parcalar = [hikaye_metni]
+
+    parca_suresi = toplam_sure / len(parcalar)
+
+    satirlar = ["WEBVTT", ""]
+    for idx, parca in enumerate(parcalar):
+        baslangic = idx * parca_suresi
+        bitis = min((idx + 1) * parca_suresi, toplam_sure)
+        satirlar.append(str(idx + 1))
+        satirlar.append(f"{_format_vtt_zaman(baslangic)} --> {_format_vtt_zaman(bitis)}")
+        satirlar.append(parca)
+        satirlar.append("")
+
+    with open(vtt_yolu, "w", encoding="utf-8") as f:
+        f.write("\n".join(satirlar))
+
+    log.info(f"  ✓ Altyazı dosyası kaydedildi ({len(parcalar)} parça): {vtt_yolu}")
+
+
+def _format_vtt_zaman(saniye: float) -> str:
+    """Saniyeyi HH:MM:SS.mmm formatına çevirir."""
+    saat = int(saniye // 3600)
+    dakika = int((saniye % 3600) // 60)
+    sn = int(saniye % 60)
+    ms = int((saniye % 1) * 1000)
+    return f"{saat:02d}:{dakika:02d}:{sn:02d}.{ms:03d}"
 
 
 def _gecici_dosyalari_temizle(*dosya_yollari: str) -> None:
@@ -291,6 +358,8 @@ def generate_video():
 
     kullanici_fikri = veri["user_prompt"].strip()
     log.info(f"Yeni istek alındı → '{kullanici_fikri[:60]}…'")
+    current_status["durum"] = "🚀 Video üretim süreci başladı..."
+    current_status["aşama"] = 0
 
     # Her istek için benzersiz ID; paralel isteklerde çakışmayı önler
     istek_id = uuid.uuid4().hex[:8]
@@ -309,12 +378,15 @@ def generate_video():
         
         log.info(f"  Başlık: '{baslik}'")
         log.info(f"  Aşama 2 → {len(tasvirler)} adet görsel üretimi başlıyor…")
+        current_status["durum"] = f"🎨 {len(tasvirler)} adet sahne görseli çiziliyor..."
+        current_status["aşama"] = 2
 
         for i, tasvir in enumerate(tasvirler):
             gorsel_yolu = os.path.join(TEMP_DIR, f"gorsel_{istek_id}_{i}.jpg")
             gorsel_yollari.append(gorsel_yolu)
             
             try:
+                current_status["durum"] = f"🎨 Sahne {i+1}/{len(tasvirler)} için görsel çiziliyor..."
                 _gorsel_indir(tasvir, gorsel_yolu)
             except Exception as e:
                 # Tavizsiz İptal (Hard Fail) - 400/500 JSON dönecek
@@ -328,22 +400,36 @@ def generate_video():
         # ── Aşama 3: YZ Ses Üretimi ──────────────────────────
         _ses_uret(hikaye, ses_yolu)
 
-        # ── Aşama 4: Video Birleştirme ────────────────────────
+        # ── Aşama 4: Video Birleştirme (Crossfade) ──────────────
         _video_birlestir(gorsel_yollari, ses_yolu, video_yolu)
+
+        # ── Aşama 5: WebVTT Altyazı Üretimi ───────────────────
+        ses_klibi_tmp = AudioFileClip(ses_yolu)
+        toplam_ses_suresi = ses_klibi_tmp.duration
+        ses_klibi_tmp.close()
+        
+        altyazi_adi = f"subtitle_{istek_id}.vtt"
+        altyazi_yolu = os.path.join(STATIC_DIR, altyazi_adi)
+        _altyazi_uret(hikaye, toplam_ses_suresi, altyazi_yolu)
 
         # ── Yanıt ────────────────────────────────────────────
         video_url = f"{request.host_url}static/{video_adi}"
+        subtitle_url = f"{request.host_url}static/{altyazi_adi}"
         log.info(f"✓ Tüm aşamalar tamamlandı. Video URL: {video_url}")
+        current_status["durum"] = "✅ Video hazır!"
+        current_status["aşama"] = 5
 
         return jsonify({
             "success": True,
             "baslik": baslik,
             "hikaye": hikaye,
             "video_url": video_url,
+            "subtitle_url": subtitle_url,
         })
 
     except Exception as e:
         log.exception(f"✗ Kritik hata: {e}")
+        current_status["durum"] = "❌ Hata oluştu"
         return jsonify({
             "success": False,
             "hata": f"Sunucu tarafında bir hata oluştu: {str(e)}",
@@ -352,6 +438,12 @@ def generate_video():
     finally:
         # Geçici dosyaları her durumda temizle
         _gecici_dosyalari_temizle(ses_yolu, *gorsel_yollari)
+
+
+@app.route("/status", methods=["GET"])
+def durum_sorgula():
+    """Frontend'in canlı durum takibi için kullandığı endpoint."""
+    return jsonify(current_status), 200
 
 
 @app.route("/static/<path:dosya_adi>")

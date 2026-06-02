@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -20,6 +21,8 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   final TextEditingController _promptController = TextEditingController();
   bool _isLoading = false;
+  String _statusText = '';
+  Timer? _statusTimer;
 
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
@@ -41,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen>
   void dispose() {
     _promptController.dispose();
     _pulseController.dispose();
+    _statusTimer?.cancel();
     super.dispose();
   }
 
@@ -56,7 +60,13 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _statusText = '🚀 Video üretim süreci başladı...';
+    });
+
+    // Canlı durum takibini başlat (saniyede bir)
+    _statusTimer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchStatus());
 
     try {
       // Doğrudan Python backend endpoint'ine istek atıyoruz.
@@ -78,6 +88,7 @@ class _HomeScreenState extends State<HomeScreen>
           final title = data['baslik'] ?? 'İsimsiz Hikaye';
           final content = data['hikaye'] ?? '';
           final videoUrl = data['video_url'] ?? '';
+          final subtitleUrl = data['subtitle_url'] ?? '';
 
           // Gelen yanıtı alıp yerel listeye pürüzsüzce kaydediyoruz.
           final story = StoryModel(
@@ -102,7 +113,10 @@ class _HomeScreenState extends State<HomeScreen>
             Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => StoryDetailScreen(story: story),
+                builder: (_) => StoryDetailScreen(
+                  story: story,
+                  subtitleUrl: subtitleUrl,
+                ),
               ),
             );
           }
@@ -121,7 +135,30 @@ class _HomeScreenState extends State<HomeScreen>
         );
       }
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      _statusTimer?.cancel();
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _statusText = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _fetchStatus() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://localhost:5000/status'),
+      ).timeout(const Duration(seconds: 2));
+
+      if (response.statusCode == 200 && mounted) {
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
+        setState(() {
+          _statusText = data['durum'] ?? '';
+        });
+      }
+    } catch (_) {
+      // Durum endpointi erişilemezse sessizce devam et
     }
   }
 
@@ -305,26 +342,43 @@ class _HomeScreenState extends State<HomeScreen>
                   shadowColor: Colors.deepPurple.withValues(alpha: 0.5),
                 ),
                 child: _isLoading
-                    ? const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                    ? Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.5,
-                              color: Colors.white70,
-                            ),
+                          const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              SizedBox(width: 10),
+                              Text(
+                                'Video üretiliyor…',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ),
-                          SizedBox(width: 10),
-                          Text(
-                            'Hikaye ve video üretiliyor…',
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
+                          if (_statusText.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              _statusText,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.deepPurpleAccent.withValues(alpha: 0.8),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       )
                     : const Row(

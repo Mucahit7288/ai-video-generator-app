@@ -1,11 +1,89 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
-import 'package:ai_video_frontend/models/story_model.dart'; // Local class çakışmasını önlemek için asıl modeli import ettik
+import 'package:http/http.dart' as http;
+import 'package:ai_video_frontend/models/story_model.dart';
+
+// ─────────────────────────────────────────────
+// WebVTT Ayrıştırıcı (Parser)
+// ─────────────────────────────────────────────
+
+class SubtitleEntry {
+  final Duration start;
+  final Duration end;
+  final String text;
+  SubtitleEntry({required this.start, required this.end, required this.text});
+}
+
+List<SubtitleEntry> _parseVtt(String vttContent) {
+  final entries = <SubtitleEntry>[];
+  final lines = vttContent.split('\n');
+  int i = 0;
+
+  // WEBVTT başlığını atla
+  while (i < lines.length && !lines[i].contains('-->')) {
+    i++;
+  }
+
+  while (i < lines.length) {
+    final line = lines[i].trim();
+    if (line.contains('-->')) {
+      final parts = line.split('-->');
+      if (parts.length == 2) {
+        final start = _parseVttTime(parts[0].trim());
+        final end = _parseVttTime(parts[1].trim());
+        i++;
+        final textLines = <String>[];
+        while (i < lines.length && lines[i].trim().isNotEmpty) {
+          textLines.add(lines[i].trim());
+          i++;
+        }
+        if (textLines.isNotEmpty) {
+          entries.add(SubtitleEntry(
+            start: start,
+            end: end,
+            text: textLines.join(' '),
+          ));
+        }
+      }
+    }
+    i++;
+  }
+  return entries;
+}
+
+Duration _parseVttTime(String time) {
+  // Format: HH:MM:SS.mmm
+  final parts = time.split(':');
+  if (parts.length == 3) {
+    final hours = int.tryParse(parts[0]) ?? 0;
+    final minutes = int.tryParse(parts[1]) ?? 0;
+    final secParts = parts[2].split('.');
+    final seconds = int.tryParse(secParts[0]) ?? 0;
+    final millis = secParts.length > 1 ? int.tryParse(secParts[1]) ?? 0 : 0;
+    return Duration(
+      hours: hours,
+      minutes: minutes,
+      seconds: seconds,
+      milliseconds: millis,
+    );
+  }
+  return Duration.zero;
+}
+
+// ─────────────────────────────────────────────
+// Hikaye Detay Ekranı
+// ─────────────────────────────────────────────
 
 class StoryDetailScreen extends StatefulWidget {
-  const StoryDetailScreen({super.key, required this.story});
+  const StoryDetailScreen({
+    super.key,
+    required this.story,
+    this.subtitleUrl,
+  });
 
   final StoryModel story;
+  final String? subtitleUrl;
 
   @override
   State<StoryDetailScreen> createState() => _StoryDetailScreenState();
@@ -17,6 +95,14 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   bool _isVideoPlaying = false;
 
   VideoPlayerController? _videoController;
+
+  // Altyazı sistemi
+  List<SubtitleEntry> _subtitles = [];
+  String _currentSubtitle = '';
+  bool _showSubtitles = true;
+
+  // Tam ekran
+  bool _isFullscreen = false;
 
   late final AnimationController _shimmerController;
   late final AnimationController _pulseController;
@@ -61,6 +147,9 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
       begin: 0.0,
       end: 1.0,
     ).animate(CurvedAnimation(parent: _starsController, curve: Curves.linear));
+
+    // Altyazı dosyasını yükle
+    _loadSubtitles();
   }
 
   @override
@@ -70,7 +159,49 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
     _shimmerController.dispose();
     _pulseController.dispose();
     _starsController.dispose();
+    // Tam ekrandan çıkarken ekran yönünü sıfırla
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
+  }
+
+  Future<void> _loadSubtitles() async {
+    final url = widget.subtitleUrl;
+    if (url == null || url.isEmpty) return;
+
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final content = response.body;
+        setState(() {
+          _subtitles = _parseVtt(content);
+        });
+      }
+    } catch (e) {
+      debugPrint('Altyazı yüklenirken hata: $e');
+    }
+  }
+
+  void _updateSubtitle() {
+    if (_videoController == null || _subtitles.isEmpty || !_showSubtitles) {
+      if (_currentSubtitle.isNotEmpty) {
+        setState(() => _currentSubtitle = '');
+      }
+      return;
+    }
+
+    final position = _videoController!.value.position;
+    String newSub = '';
+    for (final entry in _subtitles) {
+      if (position >= entry.start && position <= entry.end) {
+        newSub = entry.text;
+        break;
+      }
+    }
+
+    if (newSub != _currentSubtitle) {
+      setState(() => _currentSubtitle = newSub);
+    }
   }
 
   void _simulateProgress() async {
@@ -131,6 +262,8 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
             _isVideoPlaying = isPlaying;
           });
         }
+        // Altyazıyı güncelle
+        _updateSubtitle();
       });
 
       if (!mounted) return;
@@ -177,8 +310,39 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
     setState(() {});
   }
 
+  void _toggleSubtitles() {
+    setState(() {
+      _showSubtitles = !_showSubtitles;
+      if (!_showSubtitles) _currentSubtitle = '';
+    });
+  }
+
+  void _toggleFullscreen() {
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+    });
+
+    if (_isFullscreen) {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isFullscreen) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: _buildFullscreenPlayer(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFF0D0B1A),
       appBar: _buildAppBar(context),
@@ -189,6 +353,39 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
           children: [_buildVideoPlayer(), _buildStorySection()],
         ),
       ),
+    );
+  }
+
+  Widget _buildFullscreenPlayer() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_videoController != null && _videoController!.value.isInitialized)
+          Center(
+            child: AspectRatio(
+              aspectRatio: _videoController!.value.aspectRatio,
+              child: VideoPlayer(_videoController!),
+            ),
+          ),
+
+        // Altyazı (Fullscreen)
+        if (_currentSubtitle.isNotEmpty && _showSubtitles)
+          Positioned(
+            bottom: 60,
+            left: 24,
+            right: 24,
+            child: _buildSubtitleWidget(),
+          ),
+
+        // Kontroller (Fullscreen)
+        if (_videoController != null && _videoController!.value.isInitialized)
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: _buildControlsBar(),
+          ),
+      ],
     );
   }
 
@@ -286,9 +483,40 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                   ),
                 ),
 
+              // Altyazı (Normal mod)
+              if (_currentSubtitle.isNotEmpty && _showSubtitles)
+                Positioned(
+                  bottom: 56,
+                  left: 12,
+                  right: 12,
+                  child: _buildSubtitleWidget(),
+                ),
+
               if (_videoController != null && _videoController!.value.isInitialized)
                 _buildPlayingOverlay(),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSubtitleWidget() {
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.75),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          _currentSubtitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 14,
+            color: Colors.white,
+            fontWeight: FontWeight.w500,
+            height: 1.3,
           ),
         ),
       ),
@@ -449,129 +677,178 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
           bottom: 0,
           left: 0,
           right: 0,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.85),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-            padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // İleri-Geri Sarma Çubuğu (VideoProgressIndicator)
-                VideoProgressIndicator(
-                  _videoController!,
-                  allowScrubbing: true,
-                  colors: VideoProgressColors(
-                    playedColor: Colors.deepPurpleAccent,
-                    bufferedColor: Colors.white.withValues(alpha: 0.3),
-                    backgroundColor: Colors.white.withValues(alpha: 0.1),
-                  ),
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                ),
-                
-                const SizedBox(height: 8),
-                
-                // Kontrol Butonları
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Sol taraftaki oynatma kontrolleri
-                    Row(
-                      children: [
-                        // Geri 10 Saniye
-                        GestureDetector(
-                          onTap: _seekBackward,
-                          child: const Icon(
-                            Icons.replay_10_rounded,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                        ),
-                        const SizedBox(width: 20),
-                        
-                        // Oynat / Durdur
-                        GestureDetector(
-                          onTap: _onPlayPressed,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.deepPurpleAccent.withValues(alpha: 0.2),
-                            ),
-                            padding: const EdgeInsets.all(4),
-                            child: Icon(
-                              _isVideoPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                              color: Colors.white,
-                              size: 32,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 20),
-                        
-                        // İleri 10 Saniye
-                        GestureDetector(
-                          onTap: _seekForward,
-                          child: const Icon(
-                            Icons.forward_10_rounded,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                        ),
-                      ],
-                    ),
-                    
-                    // Sağ taraftaki ses kontrolü (Mute/Unmute) ve Ses Çubuğu
-                    Row(
-                      children: [
-                        GestureDetector(
-                          onTap: _toggleMute,
-                          child: Icon(
-                            (_videoController!.value.volume == 0)
-                                ? Icons.volume_off_rounded
-                                : Icons.volume_up_rounded,
-                            color: Colors.white,
-                            size: 26,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 80,
-                          child: SliderTheme(
-                            data: SliderThemeData(
-                              trackHeight: 2.5,
-                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0),
-                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14.0),
-                              activeTrackColor: Colors.deepPurpleAccent,
-                              inactiveTrackColor: Colors.white.withValues(alpha: 0.2),
-                              thumbColor: Colors.white,
-                              overlayColor: Colors.deepPurpleAccent.withValues(alpha: 0.2),
-                            ),
-                            child: Slider(
-                              value: _videoController!.value.volume,
-                              min: 0.0,
-                              max: 1.0,
-                              onChanged: (value) {
-                                setState(() {
-                                  _videoController!.setVolume(value);
-                                });
-                              },
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+          child: _buildControlsBar(),
         ),
       ],
+    );
+  }
+
+  Widget _buildControlsBar() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [
+            Colors.black.withValues(alpha: 0.85),
+            Colors.transparent,
+          ],
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // İleri-Geri Sarma Çubuğu (VideoProgressIndicator)
+          VideoProgressIndicator(
+            _videoController!,
+            allowScrubbing: true,
+            colors: VideoProgressColors(
+              playedColor: Colors.deepPurpleAccent,
+              bufferedColor: Colors.white.withValues(alpha: 0.3),
+              backgroundColor: Colors.white.withValues(alpha: 0.1),
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 8),
+          ),
+          
+          const SizedBox(height: 8),
+          
+          // Kontrol Butonları
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              // Sol taraftaki oynatma kontrolleri
+              Row(
+                children: [
+                  // Geri 10 Saniye
+                  GestureDetector(
+                    onTap: _seekBackward,
+                    child: const Icon(
+                      Icons.replay_10_rounded,
+                      color: Colors.white,
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  
+                  // Oynat / Durdur
+                  GestureDetector(
+                    onTap: _onPlayPressed,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.deepPurpleAccent.withValues(alpha: 0.2),
+                      ),
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(
+                        _isVideoPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                        color: Colors.white,
+                        size: 32,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  
+                  // İleri 10 Saniye
+                  GestureDetector(
+                    onTap: _seekForward,
+                    child: const Icon(
+                      Icons.forward_10_rounded,
+                      color: Colors.white,
+                      size: 28,
+                    ),
+                  ),
+                ],
+              ),
+              
+              // Sağ taraftaki kontroller: Ses + Altyazı + Tam Ekran
+              Row(
+                children: [
+                  // Ses kontrolü ve Slider
+                  GestureDetector(
+                    onTap: _toggleMute,
+                    child: Icon(
+                      (_videoController!.value.volume == 0)
+                          ? Icons.volume_off_rounded
+                          : Icons.volume_up_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
+                  SizedBox(
+                    width: 80,
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        trackHeight: 2.5,
+                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0),
+                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 14.0),
+                        activeTrackColor: Colors.deepPurpleAccent,
+                        inactiveTrackColor: Colors.white.withValues(alpha: 0.2),
+                        thumbColor: Colors.white,
+                        overlayColor: Colors.deepPurpleAccent.withValues(alpha: 0.2),
+                      ),
+                      child: Slider(
+                        value: _videoController!.value.volume,
+                        min: 0.0,
+                        max: 1.0,
+                        onChanged: (value) {
+                          setState(() {
+                            _videoController!.setVolume(value);
+                          });
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+
+                  // CC (Altyazı) Butonu
+                  GestureDetector(
+                    onTap: _toggleSubtitles,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: _showSubtitles
+                              ? Colors.deepPurpleAccent
+                              : Colors.white.withValues(alpha: 0.4),
+                          width: 1.5,
+                        ),
+                        color: _showSubtitles
+                            ? Colors.deepPurpleAccent.withValues(alpha: 0.3)
+                            : Colors.transparent,
+                      ),
+                      child: Text(
+                        'CC',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          color: _showSubtitles
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+
+                  // Tam Ekran Butonu
+                  GestureDetector(
+                    onTap: _toggleFullscreen,
+                    child: Icon(
+                      _isFullscreen
+                          ? Icons.fullscreen_exit_rounded
+                          : Icons.fullscreen_rounded,
+                      color: Colors.white,
+                      size: 28,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
