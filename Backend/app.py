@@ -84,7 +84,7 @@ def _yz_hikaye_uret(kullanici_fikri: str) -> dict:
     sistem_talimati = (
         "Sen yaratıcı bir Türkçe hikaye yazarısın ve görsel bir sanat yönetmenisin. "
         "Kullanıcının verdiği fikirden yola çıkarak kısa, etkileyici ve görsel açıdan zengin bir hikaye yaz. "
-        "Aynı zamanda bu hikayeyi metnin akışına ve olay örgüsüne göre dinamik sayıda sahneye (en az 3, en fazla 6 sahne) ayır. "
+        "Gelen hikaye ne kadar uzun olursa olsun, hikayeyi tam olarak 3 ana sahneye (görsel tasvirine) böleceksin. Ne 1 eksik ne 1 fazla, KESİNLİKLE TAM 3 ADET SAHNE OLACAK. "
         "Her sahnenin görsel promptunu kesinlikle en fazla 5-6 kelimelik, İngilizce ve çok net nesne tasvirleri olarak yaz. (Örnek: Black cat with amber eyes).\n\n"
         "ÇIKTI FORMATI — Bu kurallara kesinlikle uy:\n"
         "YALNIZCA aşağıdaki JSON formatında cevap ver, Markdown (```json) etiketleri veya ek metin kullanma:\n"
@@ -116,7 +116,7 @@ def _yz_hikaye_uret(kullanici_fikri: str) -> dict:
         sonuc = json.loads(ham_metin)
         # Güvenlik için en fazla 6 sahne
         if "tasvirler" in sonuc and isinstance(sonuc["tasvirler"], list):
-            sonuc["tasvirler"] = [str(t) for t in sonuc["tasvirler"][:6]]
+            sonuc["tasvirler"] = [str(t) for t in sonuc["tasvirler"][:3]]
         return sonuc
     except json.JSONDecodeError as e:
         log.error(f"Gemini yanıtı ayrıştırılamadı: {e}. Ham metin: {ham_metin}")
@@ -140,10 +140,7 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
     temiz_kelimeler = temiz_tasvir.split()[:4]
     temiz_tasvir = " ".join(temiz_kelimeler).strip()
     
-    # URL formatına uygun hale getir
-    encode_tasvir = urllib.parse.quote(temiz_tasvir)
-    seed = random.randint(1, 99999)
-    api_url = f"https://image.pollinations.ai/prompt/{encode_tasvir}?width={IMG_WIDTH}&height={IMG_HEIGHT}&nologo=true&seed={seed}"
+    url = f"https://image.pollinations.ai/prompt/{temiz_tasvir}?width=1280&height=720&nologo=true&seed={random.randint(1,99999)}"
     
     for deneme in range(3):
         # Spam koruması: İstek atmadan önce bekle
@@ -152,7 +149,7 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
         
         try:
             log.info(f"  Görsel üretiliyor (Pollinations): '{temiz_tasvir}'…")
-            yanit = requests.get(api_url, timeout=30)
+            yanit = requests.get(url, timeout=60)
             yanit.raise_for_status()
 
             with open(dosya_yolu, "wb") as f:
@@ -169,8 +166,24 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
         except Exception as e:
             log.error(f"  ✗ Pollinations hatası (Deneme {deneme+1}): {e}")
             if deneme == 2:
-                # 3 hakkın sonu -> Hard fail
-                raise Exception("Pollinations API görseli üretemedi. (3 deneme başarısız)")
+                # 3 hakkın sonu -> Yedek Motor (LoremFlickr)
+                log.warning("⚠️ Pollinations çöktü, Yedek Motor (LoremFlickr) devreye giriyor...")
+                clean_keywords = ",".join(temiz_kelimeler[:2])
+                fallback_url = f"https://loremflickr.com/1280/720/{clean_keywords}"
+                
+                try:
+                    log.info(f"  Yedek resim indiriliyor: {fallback_url}")
+                    yedek_yanit = requests.get(fallback_url, timeout=30)
+                    yedek_yanit.raise_for_status()
+                    
+                    with open(dosya_yolu, "wb") as f:
+                        f.write(yedek_yanit.content)
+                        
+                    log.info(f"  ✓ Yedek görsel kaydedildi: {dosya_yolu}")
+                    return # Başarılı çıkış
+                except Exception as yedek_e:
+                    log.error(f"  ✗ Yedek motor da başarısız: {yedek_e}")
+                    raise Exception("Hem Pollinations hem de Yedek motor çöktü.")
 
 
 def _ses_uret(hikaye_metni: str, ses_yolu: str) -> None:
