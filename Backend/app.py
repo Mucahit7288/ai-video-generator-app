@@ -16,6 +16,11 @@ import logging
 import requests
 import random
 import shutil
+import time
+import urllib.parse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -29,7 +34,7 @@ from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
 # Buraya Google AI Studio'dan aldığınız yeni Gemini API anahtarını girin.
 # Flutter tarafı bu anahtarı hiç görmez; tüm YZ çağrıları sunucu üzerinden yapılır.
-GEMINI_API_KEY = "BURAYA-API-KEY-GELECEK"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Üretilen geçici dosyalar ve nihai video bu klasöre kaydedilir.
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -68,25 +73,29 @@ genai.configure(api_key=GEMINI_API_KEY)
 # YARDIMCI FONKSİYONLAR
 # ─────────────────────────────────────────────
 
-def _yz_hikaye_uret(kullanici_fikri: str) -> dict[str, str]:
+def _yz_hikaye_uret(kullanici_fikri: str) -> dict:
     """
-    Gemini kullanarak kullanıcının fikrini Türkçe kısa bir hikayeye dönüştürür.
-    Döndürür: {'baslik': str, 'hikaye': str}
+    Gemini kullanarak tek bir istekte Türkçe kısa hikaye üretir ve 
+    bu hikayenin dinamik sahne tasvirlerini oluşturur.
+    Döndürür: {'baslik': str, 'hikaye': str, 'tasvirler': list[str]}
     """
-    log.info("Aşama 1 → YZ hikaye üretimi başlıyor…")
+    log.info("Aşama 1 & 2 → YZ hikaye ve dinamik sahne üretimi tek adımda başlıyor…")
 
     sistem_talimati = (
-        "Sen yaratıcı bir Türkçe hikaye yazarısın. "
-        "Kullanıcının verdiği fikirden yola çıkarak kısa, etkileyici ve görsel açıdan zengin bir hikaye yaz.\n\n"
+        "Sen yaratıcı bir Türkçe hikaye yazarısın ve görsel bir sanat yönetmenisin. "
+        "Kullanıcının verdiği fikirden yola çıkarak kısa, etkileyici ve görsel açıdan zengin bir hikaye yaz. "
+        "Aynı zamanda bu hikayeyi metnin akışına ve olay örgüsüne göre dinamik sayıda sahneye (en az 3, en fazla 6 sahne) ayır. "
+        "Her sahnenin görsel promptunu kesinlikle en fazla 5-6 kelimelik, İngilizce ve çok net nesne tasvirleri olarak yaz. (Örnek: Black cat with amber eyes).\n\n"
         "ÇIKTI FORMATI — Bu kurallara kesinlikle uy:\n"
-        "1. İlk satır: BAŞLIK: [hikayenin başlığı]\n"
-        "2. İkinci satır: HİKAYE: [hikayenin tamamı]\n"
-        "3. Hikaye en az 3, en fazla 6 paragraf olsun.\n"
-        "4. Her paragrafı net bir sahne gibi yaz; görsel açıdan tasvir edilebilir olsun.\n"
-        "5. Bu iki satırın dışında hiçbir açıklama, selamlama veya ek metin yazma.\n\n"
-        "ÖRNEK:\n"
-        "BAŞLIK: Yıldızların Altında\n"
-        "HİKAYE: O gece gökyüzü hiç bu kadar net olmamıştı…"
+        "YALNIZCA aşağıdaki JSON formatında cevap ver, Markdown (```json) etiketleri veya ek metin kullanma:\n"
+        "{\n"
+        '  "baslik": "Hikayenin Başlığı",\n'
+        '  "hikaye": "Hikayenin tamamı...",\n'
+        '  "tasvirler": [\n'
+        '    "sahne 1 ingilizce prompt",\n'
+        '    "sahne 2 ingilizce prompt"\n'
+        "  ]\n"
+        "}"
     )
 
     model = genai.GenerativeModel(
@@ -97,132 +106,71 @@ def _yz_hikaye_uret(kullanici_fikri: str) -> dict[str, str]:
     yanit = model.generate_content(kullanici_fikri)
     ham_metin = yanit.text.strip()
 
-    log.info("Gemini yanıtı alındı, ayrıştırılıyor…")
-    return _yaniti_ayristir(ham_metin)
+    # Eğer markdown varsa temizle
+    if ham_metin.startswith("```"):
+        ham_metin = re.sub(r"^```(?:json)?\n", "", ham_metin)
+        ham_metin = re.sub(r"\n```$", "", ham_metin)
 
-
-def _yaniti_ayristir(ham_metin: str) -> dict[str, str]:
-    """
-    Gemini'den gelen ham metni BAŞLIK / HİKAYE bölümlerine ayırır.
-    Format ne kadar esnek olursa olsun güvenli şekilde çalışır.
-    """
-    baslik_eslesmesi = re.search(
-        r"BAŞLIK\s*:\s*(.+?)(?=\nHİKAYE\s*:|\r\nHİKAYE\s*:)",
-        ham_metin,
-        re.DOTALL | re.IGNORECASE,
-    )
-    hikaye_eslesmesi = re.search(
-        r"HİKAYE\s*:\s*([\s\S]+)",
-        ham_metin,
-        re.IGNORECASE,
-    )
-
-    if baslik_eslesmesi and hikaye_eslesmesi:
-        baslik = baslik_eslesmesi.group(1).strip()
-        hikaye = hikaye_eslesmesi.group(1).strip()
-    else:
-        # Etiket yoksa: ilk satır → başlık, geri kalan → hikaye
-        satirlar = [s.strip() for s in ham_metin.split("\n") if s.strip()]
-        baslik = _kisalt_baslik(satirlar[0]) if satirlar else "İsimsiz Hikaye"
-        hikaye = "\n\n".join(satirlar[1:]) if len(satirlar) > 1 else ham_metin
-
-    return {
-        "baslik": baslik or "İsimsiz Hikaye",
-        "hikaye": hikaye or ham_metin,
-    }
-
-
-def _kisalt_baslik(metin: str, maks_kelime: int = 5) -> str:
-    """Başlığı en fazla maks_kelime kelimeyle kırpar."""
-    kelimeler = metin.split()
-    if len(kelimeler) <= maks_kelime:
-        return metin
-    return " ".join(kelimeler[:maks_kelime]) + "…"
-
-
-def _sahne_tasvirleri_cikar(hikaye_metni: str) -> list[str]:
-    """
-    Hikaye metnini paragraflara bölerek her paragraftan
-    Pollinations API için İngilizce görsel tasviri üretir.
-    Gemini bu dönüşümü de yapar; 3 tasvir döndürür.
-    """
-    log.info("Aşama 2a → Sahne tasvirleri çıkarılıyor…")
-
-    sistem = (
-        "You are a visual art director. "
-        "Given a Turkish story, extract exactly 3 scene descriptions in English "
-        "suitable as image generation prompts. "
-        "Each description must be vivid, cinematic, and 10–20 words long. "
-        "Respond ONLY with a JSON array of 3 strings, nothing else. "
-        'Example: ["A lone astronaut floating in deep space, stars glowing", '
-        '"An ancient forest bathed in golden light", '
-        '"A futuristic city at night, neon reflections on wet streets"]'
-    )
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=sistem,
-    )
-
-    yanit = model.generate_content(hikaye_metni)
-    ham = yanit.text.strip()
-
-    # JSON dizisini güvenle ayrıştır
-    json_eslesmesi = re.search(r"\[.*?\]", ham, re.DOTALL)
-    if json_eslesmesi:
-        import json
-        try:
-            tasvirler = json.loads(json_eslesmesi.group())
-            if isinstance(tasvirler, list) and len(tasvirler) >= 3:
-                return [str(t) for t in tasvirler[:3]]
-        except json.JSONDecodeError:
-            pass
-
-    # Yedek: metni satırlara böl
-    log.warning("JSON ayrıştırma başarısız, satır bazlı yedek kullanılıyor.")
-    satirlar = [s.strip().strip('"') for s in ham.split("\n") if s.strip()]
-    tasvirler = satirlar[:3]
-    while len(tasvirler) < 3:
-        tasvirler.append("Beautiful cinematic landscape with warm natural lighting")
-    return tasvirler
-
-
-def _gorsel_indir(tasvir: str, dosya_yolu: str) -> bool:
-    """
-    Sade ve stabil Pollinations API'sinden bir görsel indirir.
-    Premium filtrelere takılmamak için prompt temizlenir ve 120 karaktere kırpılır.
-    Seed kullanılarak timeout riski azaltılır.
-    Başarılıysa True, değilse False döner.
-    """
-    # Noktalama işaretlerini ve özel karakterleri temizle (sadece harf, rakam ve boşluk kalsın)
-    temiz_tasvir = re.sub(r"[^\w\s]", "", tasvir)
-    
-    # Maksimum 120 karaktere kırp
-    temiz_tasvir = temiz_tasvir[:120].strip()
-    temiz_tasvir = temiz_tasvir.replace(" ", "%20")
-    
-    seed = random.randint(1, 1000)
-    url = f"https://image.pollinations.ai/prompt/{temiz_tasvir}?width={IMG_WIDTH}&height={IMG_HEIGHT}&nologo=true&seed={seed}"
-
+    import json
     try:
-        log.info(f"  Görsel indiriliyor: {url[:80]}…")
-        yanit = requests.get(url, timeout=45)
-        yanit.raise_for_status()
+        sonuc = json.loads(ham_metin)
+        # Güvenlik için en fazla 6 sahne
+        if "tasvirler" in sonuc and isinstance(sonuc["tasvirler"], list):
+            sonuc["tasvirler"] = [str(t) for t in sonuc["tasvirler"][:6]]
+        return sonuc
+    except json.JSONDecodeError as e:
+        log.error(f"Gemini yanıtı ayrıştırılamadı: {e}. Ham metin: {ham_metin}")
+        return {
+            "baslik": "İsimsiz Hikaye",
+            "hikaye": kullanici_fikri,
+            "tasvirler": ["space landscape", "nature landscape", "city landscape"]
+        }
 
-        with open(dosya_yolu, "wb") as f:
-            f.write(yanit.content)
 
-        dosya_boyutu = os.path.getsize(dosya_yolu)
-        if dosya_boyutu < 10000: # 10 KB altındaysa muhtemelen hatalı/bozuk görseldir
-            log.warning("  Dosya boyutu çok küçük, görsel bozuk olabilir.")
-            return False
-            
-        log.info(f"  ✓ Görsel kaydedildi ({dosya_boyutu // 1024} KB): {dosya_yolu}")
-        return True
+def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
+    """
+    SADECE Hızlı Pollinations/Prodia motorunu kullanır.
+    Eğer 3 denemede de başarısız olursa Hard Fail (Exception) fırlatır.
+    Gelişmiş Prompt Sadeleştirici ile 402 hatalarını engeller.
+    Asla sahte görsel döndürmez.
+    """
+    # Kurşun Geçirmez Prompt Filtresi (402 Engelleme Mekanizması)
+    temiz_tasvir = re.sub(r'[^a-zA-Z\s]', '', tasvir)
+    # Sadece ilk 4 kelimeyi al
+    temiz_kelimeler = temiz_tasvir.split()[:4]
+    temiz_tasvir = " ".join(temiz_kelimeler).strip()
+    
+    # URL formatına uygun hale getir
+    encode_tasvir = urllib.parse.quote(temiz_tasvir)
+    seed = random.randint(1, 99999)
+    api_url = f"https://image.pollinations.ai/prompt/{encode_tasvir}?width={IMG_WIDTH}&height={IMG_HEIGHT}&nologo=true&seed={seed}"
+    
+    for deneme in range(3):
+        # Spam koruması: İstek atmadan önce bekle
+        log.info(f"  API isteği öncesi 3 saniye bekleniyor... (Deneme {deneme+1}/3)")
+        time.sleep(3)
+        
+        try:
+            log.info(f"  Görsel üretiliyor (Pollinations): '{temiz_tasvir}'…")
+            yanit = requests.get(api_url, timeout=30)
+            yanit.raise_for_status()
 
-    except Exception as e:
-        log.error(f"  ✗ Görsel indirme hatası: {e}")
-        return False
+            with open(dosya_yolu, "wb") as f:
+                f.write(yanit.content)
+
+            dosya_boyutu = os.path.getsize(dosya_yolu)
+            if dosya_boyutu < 5000:
+                log.warning("  Dosya boyutu çok küçük, görsel bozuk veya geçersiz olabilir.")
+                raise Exception("Pollinations geçersiz/bozuk görsel döndürdü")
+                
+            log.info(f"  ✓ Görsel kaydedildi ({dosya_boyutu // 1024} KB): {dosya_yolu}")
+            return # Başarılı çıkış
+
+        except Exception as e:
+            log.error(f"  ✗ Pollinations hatası (Deneme {deneme+1}): {e}")
+            if deneme == 2:
+                # 3 hakkın sonu -> Hard fail
+                raise Exception("Pollinations API görseli üretemedi. (3 deneme başarısız)")
 
 
 def _ses_uret(hikaye_metni: str, ses_yolu: str) -> None:
@@ -340,41 +288,29 @@ def generate_video():
     video_yolu = os.path.join(STATIC_DIR, video_adi)
 
     try:
-        # ── Aşama 1: YZ Hikaye Üretimi ───────────────────────
+        # ── Aşama 1 & 2: YZ Hikaye ve Sahne Üretimi ──────────
         sonuc = _yz_hikaye_uret(kullanici_fikri)
-        baslik = sonuc["baslik"]
-        hikaye = sonuc["hikaye"]
+        baslik = sonuc.get("baslik", "İsimsiz")
+        hikaye = sonuc.get("hikaye", kullanici_fikri)
+        tasvirler = sonuc.get("tasvirler", ["space landscape", "nature landscape", "city landscape"])
+        
         log.info(f"  Başlık: '{baslik}'")
-
-        # ── Aşama 2: YZ Görsel Üretimi ───────────────────────
-        log.info("Aşama 2 → YZ görsel üretimi başlıyor…")
-        tasvirler = _sahne_tasvirleri_cikar(hikaye)
-
-        basarili_gorsel_referansi = None
+        log.info(f"  Aşama 2 → {len(tasvirler)} adet görsel üretimi başlıyor…")
 
         for i, tasvir in enumerate(tasvirler):
             gorsel_yolu = os.path.join(TEMP_DIR, f"gorsel_{istek_id}_{i}.jpg")
             gorsel_yollari.append(gorsel_yolu)
             
-            basarili = False
-            # İlk görselse hata alırsak sistemi kurtarmak için 3 kez farklı seed ile deneyelim
-            deneme_sayisi = 3 if i == 0 else 1
-            
-            for deneme in range(deneme_sayisi):
-                if _gorsel_indir(tasvir, gorsel_yolu):
-                    basarili = True
-                    basarili_gorsel_referansi = gorsel_yolu
-                    break
-                elif deneme < deneme_sayisi - 1:
-                    log.warning(f"  Görsel {i} indirilemedi, farklı seed ile tekrar deneniyor...")
-
-            # Eğer görsel indirilemediyse önceki başarılı YZ görselini klonlayarak boşluğu doldur
-            if not basarili:
-                if basarili_gorsel_referansi and os.path.exists(basarili_gorsel_referansi):
-                    shutil.copy(basarili_gorsel_referansi, gorsel_yolu)
-                    log.warning(f"  Görsel {i} başarısız oldu. Mor ekran yerine önceki YZ görseli kopyalandı.")
-                else:
-                    raise Exception("İlk görsel hiçbir şekilde indirilemedi (Pollinations API hatası).")
+            try:
+                _gorsel_indir(tasvir, gorsel_yolu)
+            except Exception as e:
+                # Tavizsiz İptal (Hard Fail) - 400/500 JSON dönecek
+                hata_mesaji = f"Sahne {i+1} için görsel üretilemedi. Lütfen hikayeyi tekrar üretin."
+                log.error(f"  ✗ {hata_mesaji} Detay: {e}")
+                return jsonify({
+                    "success": False,
+                    "hata": hata_mesaji,
+                }), 400
 
         # ── Aşama 3: YZ Ses Üretimi ──────────────────────────
         _ses_uret(hikaye, ses_yolu)

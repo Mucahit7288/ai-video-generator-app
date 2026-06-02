@@ -10,3 +10,6 @@ __pycache__/
 Flutter/.dart_tool/
 Flutter/.packages
 Flutter/build/
+
+backend/.env
+.env
