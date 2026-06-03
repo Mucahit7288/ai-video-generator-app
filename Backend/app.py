@@ -8,26 +8,29 @@ Kullanıcıdan gelen fikri sırasıyla şu aşamalardan geçirir:
   4. Video Birleştirme  → MoviePy ile output.mp4
 """
 import asyncio
-import edge_tts
+import edge_tts # type: ignore
 import os
 import re
 import uuid
 import logging
-import requests
+import requests # type: ignore
 import random
 import shutil
 import time
 import urllib.parse
-from dotenv import load_dotenv
+import urllib3
+urllib3.disable_warnings()  # HuggingFace verify=False SSL uyarılarını konsölde gizle
+from dotenv import load_dotenv # type: ignore
 
 load_dotenv()
 
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
-from gtts import gTTS
-import google.generativeai as genai
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
-from moviepy.video.fx import CrossFadeIn, CrossFadeOut
+from flask import Flask, jsonify, request, send_from_directory # pyright: ignore[reportMissingImports]
+from flask_cors import CORS # type: ignore
+from gtts import gTTS # type: ignore
+import google.generativeai as genai # type: ignore
+from moviepy import ImageClip, AudioFileClip, concatenate_videoclips # type: ignore
+from moviepy.video.fx import CrossFadeIn, CrossFadeOut # type: ignore
+from huggingface_hub import InferenceClient # type: ignore
 
 # ─────────────────────────────────────────────
 # YAPILANDIRMA
@@ -135,28 +138,65 @@ def _yz_hikaye_uret(kullanici_fikri: str) -> dict:
 
 def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
     """
-    SADECE Hızlı Pollinations/Prodia motorunu kullanır.
-    Eğer 3 denemede de başarısız olursa Hard Fail (Exception) fırlatır.
-    Gelişmiş Prompt Sadeleştirici ile 402 hatalarını engeller.
-    Asla sahte görsel döndürmez.
+    Çift Motorlu Görsel Üretim Sistemi (Güncel Öncelik Sırası):
+      1. Motor → Hugging Face SDXL SDK  (InferenceClient — kalite, bağlam uyumu)
+      2. Motor → Pollinations.ai Fallback (Chrome header, 3 deneme — kurşun geçirmez yedek)
+    Her iki motor da başarısız olursa Exception fırlatır.
     """
-    # Kurşun Geçirmez Prompt Filtresi (402 Engelleme Mekanizması)
+    # ── Prompt Filtresi ──────────────────────────────────────────────────────
+    # Sadece ASCII harf + boşluk bırak; özel karakter 402/hata riskini artırır.
     temiz_tasvir = re.sub(r'[^a-zA-Z\s]', '', tasvir)
-    # Sadece ilk 4 kelimeyi al
-    temiz_kelimeler = temiz_tasvir.split()[:4]
-    temiz_tasvir = " ".join(temiz_kelimeler).strip()
-    
-    url = f"https://image.pollinations.ai/prompt/{temiz_tasvir}?width=1280&height=720&nologo=true&seed={random.randint(1,99999)}"
-    
+    temiz_tasvir = " ".join(temiz_tasvir.split()[:4]).strip()
+
+    # ── 1. Motor: Resmi Hugging Face SDK (InferenceClient) ───────────────────
+    # SDK tüm SSL/TLS/header işini kendi içinde çözer; en kaliteli ve bağlama uyumlu motor.
+    log.info(f"  [HuggingFace SDK] 1. Motor başlatılıyor: '{temiz_tasvir}'")
+    current_status["durum"] = f"🎨 AI görseli üretiliyor (HuggingFace): '{temiz_tasvir[:25]}…'"
+
+    try:
+        hf_token = os.environ.get("HF_TOKEN")
+        client = InferenceClient(
+            model="stabilityai/stable-diffusion-xl-base-1.0",
+            token=hf_token,
+        )
+
+        log.info(f"  [HuggingFace SDK] text_to_image çağrılıyor: '{temiz_tasvir}'")
+        # SDK dönüş tipini otomatik olarak PIL.Image nesnesine çevirir.
+        image = client.text_to_image(temiz_tasvir)
+
+        # PIL Image nesnesini doğrudan JPEG olarak kaydet
+        image.save(dosya_yolu, "JPEG")
+
+        hf_boyut = os.path.getsize(dosya_yolu)
+        if hf_boyut < 5000:
+            raise Exception("HuggingFace SDK geçersiz/bozuk görsel üretti (çok küçük dosya)")
+
+        log.info(f"  ✓ [HuggingFace SDK] Görsel kaydedildi ({hf_boyut // 1024} KB): {dosya_yolu}")
+        return  # ✅ Başarılı — yedek motora gerek yok
+
+    except Exception as hf_e:
+        log.warning(f"  ⚠️ HuggingFace yoğun veya limit doldu, Yedek Motor (Pollinations) devreye giriyor... Hata: {hf_e}")
+        current_status["durum"] = f"🔄 Yedek motor (Pollinations) devreye girdi: '{temiz_tasvir[:25]}…'"
+
+    # ── 2. Motor: Pollinations Fallback (Kurşun Geçirmez Yedek) ─────────────
+    # HuggingFace başarısız olduysa, Chrome User-Agent ile 3 deneme hakkı.
+    pollinations_url = f"https://image.pollinations.ai/prompt/{temiz_tasvir}"
+    browser_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+
     for deneme in range(3):
-        # Spam koruması: İstek atmadan önce bekle
-        log.info(f"  API isteği öncesi 3 saniye bekleniyor... (Deneme {deneme+1}/3)")
+        log.info(f"  [Pollinations] İstek öncesi 3 sn bekleniyor… (Deneme {deneme+1}/3)")
         time.sleep(3)
-        
+
         try:
-            log.info(f"  Görsel üretiliyor (Pollinations): '{temiz_tasvir}'…")
-            current_status["durum"] = f"🎨 Sahne görseli çiziliyor: '{temiz_tasvir[:30]}…'"
-            yanit = requests.get(url, timeout=60)
+            log.info(f"  [Pollinations] Görsel üretiliyor: '{temiz_tasvir}'")
+            current_status["durum"] = f"🎨 Sahne görseli çiziliyor (Pollinations): '{temiz_tasvir[:25]}…'"
+            yanit = requests.get(pollinations_url, headers=browser_headers, timeout=60)
             yanit.raise_for_status()
 
             with open(dosya_yolu, "wb") as f:
@@ -164,33 +204,21 @@ def _gorsel_indir(tasvir: str, dosya_yolu: str) -> None:
 
             dosya_boyutu = os.path.getsize(dosya_yolu)
             if dosya_boyutu < 5000:
-                log.warning("  Dosya boyutu çok küçük, görsel bozuk veya geçersiz olabilir.")
-                raise Exception("Pollinations geçersiz/bozuk görsel döndürdü")
-                
-            log.info(f"  ✓ Görsel kaydedildi ({dosya_boyutu // 1024} KB): {dosya_yolu}")
-            return # Başarılı çıkış
+                raise Exception("Pollinations geçersiz/bozuk görsel döndürdü (çok küçük dosya)")
 
-        except Exception as e:
-            log.error(f"  ✗ Pollinations hatası (Deneme {deneme+1}): {e}")
-            if deneme == 2:
-                # 3 hakkın sonu -> Yedek Motor (LoremFlickr)
-                log.warning("⚠️ Pollinations çöktü, Yedek Motor (LoremFlickr) devreye giriyor...")
-                clean_keywords = ",".join(temiz_kelimeler[:2])
-                fallback_url = f"https://loremflickr.com/1280/720/{clean_keywords}"
-                
-                try:
-                    log.info(f"  Yedek resim indiriliyor: {fallback_url}")
-                    yedek_yanit = requests.get(fallback_url, timeout=30)
-                    yedek_yanit.raise_for_status()
-                    
-                    with open(dosya_yolu, "wb") as f:
-                        f.write(yedek_yanit.content)
-                        
-                    log.info(f"  ✓ Yedek görsel kaydedildi: {dosya_yolu}")
-                    return # Başarılı çıkış
-                except Exception as yedek_e:
-                    log.error(f"  ✗ Yedek motor da başarısız: {yedek_e}")
-                    raise Exception("Hem Pollinations hem de Yedek motor çöktü.")
+            log.info(f"  ✓ [Pollinations] Görsel kaydedildi ({dosya_boyutu // 1024} KB): {dosya_yolu}")
+            return  # ✅ Başarılı
+
+        except Exception as pol_e:
+            log.error(f"  ✗ [Pollinations] Hata (Deneme {deneme+1}/3): {pol_e}")
+
+    # Her iki motor da çöktü
+    raise Exception(
+        "Her iki motor da başarısız oldu.\n"
+        "  HuggingFace SDK: limit/yoğunluk hatası\n"
+        "  Pollinations   : 3/3 deneme başarısız"
+    )
+
 
 
 def _ses_uret(hikaye_metni: str, ses_yolu: str) -> None:
@@ -294,17 +322,19 @@ def _altyazi_uret(hikaye_metni: str, toplam_sure: float, vtt_yolu: str) -> None:
 
     parca_suresi = toplam_sure / len(parcalar)
 
-    satirlar = ["WEBVTT", ""]
-    for idx, parca in enumerate(parcalar):
-        baslangic = idx * parca_suresi
-        bitis = min((idx + 1) * parca_suresi, toplam_sure)
-        satirlar.append(str(idx + 1))
-        satirlar.append(f"{_format_vtt_zaman(baslangic)} --> {_format_vtt_zaman(bitis)}")
-        satirlar.append(parca)
-        satirlar.append("")
-
+    # WebVTT standardı: Başlıktan sonra KESİNLİKLE iki boş satır olmalı.
+    # "\n".join ile yazınca tek newline kalır, bunun önlemek için doğrudan string olarak yazıyoruz.
     with open(vtt_yolu, "w", encoding="utf-8") as f:
-        f.write("\n".join(satirlar))
+        # İlk satır: WEBVTT + çift boş satır (standart zorunlu)
+        f.write("WEBVTT\n\n")
+        for idx, parca in enumerate(parcalar):
+            baslangic = idx * parca_suresi
+            bitis = min((idx + 1) * parca_suresi, toplam_sure)
+            # Her cue: index, zaman damgası (NOKTA ayrıcı), metin, boş satır
+            f.write(f"{idx + 1}\n")
+            f.write(f"{_format_vtt_zaman(baslangic)} --> {_format_vtt_zaman(bitis)}\n")
+            f.write(f"{parca}\n")
+            f.write("\n")
 
     log.info(f"  ✓ Altyazı dosyası kaydedildi ({len(parcalar)} parça): {vtt_yolu}")
 
