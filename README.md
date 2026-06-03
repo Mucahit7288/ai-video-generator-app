@@ -38,7 +38,7 @@ YZ / Yapay Zeka Entegrasyonları:
 
 Metin kurgusu: Gemini API
 
-Görsel üretimi: Pollinations AI (Hızlı Çizim Kanalı)
+Görsel üretimi: Pollinations AI (Hızlı Çizim Kanalı) ve Hugging Face AI
 
 Video & Ses İşleme: MoviePy, gTTS
 
@@ -52,9 +52,10 @@ cd backend
 pip install -r requirements.txt
 pip install python-dotenv
 
-Klasörün içinde bir .env dosyası oluşturun ve Gemini API anahtarınızı ekleyin:
+Klasörün içinde bir .env dosyası oluşturun. Gemini API Ve Hugging Face Api anahtarınızı ekleyin:
 
 GEMINI_API_KEY=your_actual_gemini_api_key_here
+HF_TOKEN=your_hf_api_key_here
 
 Sunucuyu ayağa kaldırın:
 
