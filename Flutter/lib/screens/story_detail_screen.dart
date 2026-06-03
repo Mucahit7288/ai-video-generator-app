@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
@@ -116,6 +117,9 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
   double _loadingProgress = 0.0;
   bool _isDisposed = false;
 
+  // Altyazı zamanlayıcısı (saniyede 4 kez güncelleme)
+  Timer? _subtitleTimer;
+
   @override
   void initState() {
     super.initState();
@@ -148,13 +152,15 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
       end: 1.0,
     ).animate(CurvedAnimation(parent: _starsController, curve: Curves.linear));
 
-    // Altyazı dosyasını yükle
-    _loadSubtitles();
+    // Altyazı dosyasını ARTIK burada yüklemiyoruz.
+    // Race condition'u önlemek için yükleme, video başlatmadan hemen önce yapılıyor.
+    // Bkz: _onPlayPressed() içindeki await _loadSubtitles()
   }
 
   @override
   void dispose() {
     _isDisposed = true;
+    _subtitleTimer?.cancel();
     _videoController?.dispose();
     _shimmerController.dispose();
     _pulseController.dispose();
@@ -165,20 +171,29 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
     super.dispose();
   }
 
+  /// VTT dosyasını indirir ve parse eder.
+  /// Video başlatmadan önce await ile çağrılmalıdır.
   Future<void> _loadSubtitles() async {
     final url = widget.subtitleUrl;
     if (url == null || url.isEmpty) return;
 
     try {
+      debugPrint('[Altyazı] İndirme başlıyor: $url');
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
         final content = response.body;
-        setState(() {
-          _subtitles = _parseVtt(content);
-        });
+        final parsed = _parseVtt(content);
+        if (mounted) {
+          setState(() {
+            _subtitles = parsed;
+          });
+        }
+        debugPrint('[Altyazı] ✓ ${parsed.length} cue yüklendi.');
+      } else {
+        debugPrint('[Altyazı] HTTP ${response.statusCode} — altyazı atlanıyor.');
       }
     } catch (e) {
-      debugPrint('Altyazı yüklenirken hata: $e');
+      debugPrint('[Altyazı] ✗ İndirme hatası: $e');
     }
   }
 
@@ -250,9 +265,24 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
 
       _videoController = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
 
+      // ⏳ Race condition önlemi: Altyazı tamamen inip parse edilmeden video BAŞLAMIYOR.
+      // Bu await bitmeden bir sonraki satıra geçilmez.
+      await _loadSubtitles();
+
       await _videoController!.initialize();
-      await _videoController!.setLooping(true);
+      await _videoController!.setLooping(false);
       await _videoController!.play();
+
+      // Altyazıyı saniyede 4 kez güncelleyen hassas zamanlayıcı
+      _subtitleTimer?.cancel();
+      _subtitleTimer = Timer.periodic(
+        const Duration(milliseconds: 250),
+        (_) {
+          if (mounted && _videoController != null && _videoController!.value.isInitialized) {
+            _updateSubtitle();
+          }
+        },
+      );
 
       _videoController!.addListener(() {
         if (!mounted) return;
@@ -262,8 +292,6 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
             _isVideoPlaying = isPlaying;
           });
         }
-        // Altyazıyı güncelle
-        _updateSubtitle();
       });
 
       if (!mounted) return;
@@ -368,10 +396,10 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
             ),
           ),
 
-        // Altyazı (Fullscreen)
+        // Altyazı (Fullscreen) — kontrol çubuğunun üstünde kalır
         if (_currentSubtitle.isNotEmpty && _showSubtitles)
           Positioned(
-            bottom: 60,
+            bottom: 90,
             left: 24,
             right: 24,
             child: _buildSubtitleWidget(),
@@ -483,10 +511,10 @@ class _StoryDetailScreenState extends State<StoryDetailScreen>
                   ),
                 ),
 
-              // Altyazı (Normal mod)
+              // Altyazı (Normal mod) — kontrol çubuğunun üstünde kalır
               if (_currentSubtitle.isNotEmpty && _showSubtitles)
                 Positioned(
-                  bottom: 56,
+                  bottom: 90,
                   left: 12,
                   right: 12,
                   child: _buildSubtitleWidget(),

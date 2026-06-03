@@ -1,15 +1,26 @@
-# Backend geçici ve statik dosyaları
+# Backend geçici ve statik dosyaları (Hem büyük hem küçük harf ihtimaline karşı)
+backend/static/*.mp4
+backend/static/*.jpg
+backend/static/*.mp3
+backend/static/*.vtt
+backend/temp/
 Backend/static/*.mp4
 Backend/static/*.jpg
 Backend/static/*.mp3
+Backend/static/*.vtt
 Backend/temp/
+
+# Python bağımlılıkları ve çevre değişkenleri
 __pycache__/
+*.pyc
 .env
+backend/.env
+Backend/.env
 
 # Flutter Web / Bağımlılıklar
+flutter/.dart_tool/
+flutter/.packages
+flutter/build/
 Flutter/.dart_tool/
 Flutter/.packages
 Flutter/build/
-
-backend/.env
-.env
